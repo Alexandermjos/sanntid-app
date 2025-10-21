@@ -1,0 +1,677 @@
+<!DOCTYPE html>
+<html lang="no">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neste Buss Linje 3</title>
+    <!-- Legg til manifest for å muliggjøre "Installer app" på Android/Chrome -->
+    <link rel="manifest" href="manifest.json">
+    <!-- Last inn Tailwind CSS for styling og responsivt design -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Sett en tilpasset font for bedre lesbarhet */
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800;700&display=swap');
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f7f7f9; /* Lyst, nøytralt bakgrunn */
+        }
+        /* Egendefinert styling for kort og tidsteller */
+        .departure-card {
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+            transition: transform 0.3s ease;
+        }
+        .realtime-text {
+            color: #0d47a1; /* Mørkeblå farge for avgangstid */
+        }
+        .countdown-time {
+            font-variant-numeric: tabular-nums; /* Sikrer at tallene har fast bredde */
+        }
+        /* Egendefinert klasse for kansellerte kort */
+        .cancelled-card {
+            opacity: 0.6;
+        }
+
+        /* Legg til spinner-animasjon for enkel lasting-indikator */
+        .loading-spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1);
+            border-top-color: #3b82f6; /* Tailwind blue-600 */
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body class="p-4 md:p-8 flex justify-center items-start min-h-screen">
+
+    <div id="app-container" class="w-full max-w-md">
+
+        <!-- Header for appen -->
+        <header class="text-center mb-8">
+            <h1 class="text-3xl font-extrabold text-gray-800">Sanntid</h1>
+            
+            <!-- Nytt element for retning og snu-knapp -->
+            <div class="flex justify-center items-center mt-1">
+                <p id="direction-text" class="text-lg text-gray-600 mr-2">Morvikbotn mot Vadmyra</p>
+                <button id="toggle-direction-btn" class="text-sm font-semibold px-3 py-1 bg-blue-500 text-white rounded-full hover:bg-blue-600 transition duration-150 shadow-md">
+                    SNU
+                </button>
+            </div>
+        </header>
+
+        <!-- Container for avgangskortene og "Last flere" knappen -->
+        <div id="departures-list" class="space-y-4">
+            <!-- Avgangskortene settes inn her av JavaScript -->
+        </div>
+        
+        <!-- Melding ved ingen avganger -->
+        <div id="no-departures" class="text-center mt-8 p-6 bg-yellow-100 text-yellow-800 rounded-xl hidden">
+            <p class="font-semibold">Ingen kommende avganger funnet for Linje 3 eller 3E.</p>
+            <p class="text-sm mt-1">Sjekk Skyss/Entur for rutetabell.</p>
+        </div>
+
+        <!-- Tidsstempel for siste oppdatering og tidtaker. Brukes også som statusfelt under lasting. -->
+        <footer class="text-center text-xs text-gray-400 mt-8">
+             <p id="update-timer" class="mb-1 text-sm text-gray-600 font-medium">Laster...</p>
+            <p id="last-updated">Sist oppdatert: --:--:--</p>
+        </footer>
+
+    </div>
+
+    <script>
+        // --- Konfigurasjon og konstanter (på norsk) ---
+        const API_URL = "https://api.entur.io/journey-planner/v3/graphql";
+        
+        const TARGET_LINES = ["3", "3E"]; // Linjer vi ønsker å vise
+
+        // KONFIGURASJON FOR DYNAMISK OPPDATERINGSINTERVALL (I MILLISEKUNDER OG SEKUNDER)
+        const MIN_5_SECONDS = 300; // 5 minutter * 60 sekunder
+        const MIN_10_SECONDS = 600; // 10 minutter * 60 sekunder
+        const FAST_UPDATE_MS = 10000;  // < 5 minutter
+        const MEDIUM_UPDATE_MS = 30000; // 5 til 10 minutter
+        const SLOW_UPDATE_MS = 60000; // > 10 minutter
+
+        // KONFIGURASJON FOR ANTALL AVGANGER
+        const INITIAL_DEPARTURE_LIMIT = 4; // Viser 4 avganger som standard
+        const LOAD_MORE_COUNT = 2; // Laster 2 flere avganger per klikk
+        
+        // KONFIGURASJON FOR FALLBACK-SØK
+        const FIRST_FETCH_COUNT = 12; // Første forsøk på antall avganger fra API
+        const SECOND_FETCH_COUNT = 24; // Andre forsøk (fallback) på antall avganger fra API
+
+        // Variabler for app-tilstand
+        let currentDirectionKey = 'MORVIKBOTN_TO_VADMYRA';
+        let currentDisplayLimit = INITIAL_DEPARTURE_LIMIT; // Startgrense
+        let lastFetchedData = null; // Lagrer siste hentede rådata fra Entur
+        
+        let nextDepartures = [];      
+        let countdownInterval = null; 
+        let lastFetchTime = 0;        
+        let timerDisplayInterval = null; 
+        
+        let fetchInterval = null; // Holder ID for hovedoppdateringsintervallet
+        let currentUpdateIntervalMs = FAST_UPDATE_MS; // Starter med rask oppdatering
+
+        // Konfigurasjon for de to retningene
+        const DIRECTIONS = {
+            MORVIKBOTN_TO_VADMYRA: {
+                id: "NSR:Quay:55952", // Morvikbotn mot Vadmyra
+                display: "Morvikbotn mot Vadmyra"
+            },
+            FESTPLASSEN_TO_STOBOTN: {
+                id: "NSR:Quay:53203", // Festplassen mot Støbotn
+                display: "Festplassen mot Støbotn"
+            }
+        };
+
+        
+        /**
+         * Funksjon som genererer GraphQL-spørringen dynamisk basert på aktiv Quay ID og antall avganger.
+         */
+        function generateEnturQuery(quayId, numberOfDepartures) {
+            return `
+                query Departures {
+                  quay(id: "${quayId}") {
+                    id 
+                    estimatedCalls(
+                      numberOfDepartures: ${numberOfDepartures} 
+                      includeCancelledTrips: true 
+                    ) {
+                      realtime
+                      expectedDepartureTime
+                      aimedDepartureTime
+                      cancellation 
+                      occupancyStatus 
+                      
+                      situations {
+                        description {
+                          value
+                        }
+                      }
+                      
+                      destinationDisplay {
+                        frontText
+                      }
+                      serviceJourney {
+                        line {
+                          publicCode
+                        }
+                      }
+                    }
+                  }
+                }
+            `;
+        }
+        
+        /**
+         * Bytt retning og oppdater UI/data.
+         */
+        function toggleDirection() {
+            currentDirectionKey = (currentDirectionKey === 'MORVIKBOTN_TO_VADMYRA')
+                ? 'FESTPLASSEN_TO_STOBOTN'
+                : 'MORVIKBOTN_TO_VADMYRA';
+
+            const currentConfig = DIRECTIONS[currentDirectionKey];
+            
+            document.getElementById('direction-text').textContent = currentConfig.display;
+            
+            // Hent nye avganger for den nye retningen. fetchDepartures tilbakestiller også display-grensen.
+            fetchDepartures();
+        }
+
+        /**
+         * Konverterer antall sekunder til en "MM:SS" streng.
+         */
+        function formatTime(totalSeconds) {
+            const minutes = Math.floor(totalSeconds / 60);
+            const seconds = totalSeconds % 60;
+            const pad = (num) => String(num).padStart(2, '0');
+            return `${pad(minutes)}:${pad(seconds)}`;
+        }
+
+        /**
+         * Hjelpefunksjon for å oversette Entur OccupancyStatus til visuell tekst og farge.
+         */
+        function getOccupancyDisplay(status) {
+            if (!status || status === 'noData' || status === 'notApplicable') {
+                return { text: 'Ingen kapasitetsdata', color: 'bg-gray-200 text-gray-600' };
+            }
+            
+            switch (status) {
+                case 'manySeatsAvailable':
+                    return { 
+                        text: 'Mange ledige plasser', 
+                        color: 'bg-green-500 text-white' 
+                    };
+                case 'fewSeatsAvailable':
+                    return { 
+                        text: 'Få ledige plasser', 
+                        color: 'bg-yellow-500 text-gray-900' 
+                    };
+                case 'standingRoomOnly':
+                    return { 
+                        text: 'Kun ståplasser', 
+                        color: 'bg-orange-500 text-white' 
+                    };
+                case 'full':
+                    return { 
+                        text: 'Fullt', 
+                        color: 'bg-red-600 text-white' 
+                    };
+                default:
+                    return { 
+                        text: status, 
+                        color: 'bg-gray-400 text-white' 
+                    };
+            }
+        }
+
+        /**
+         * Oppdaterer nedtellingen for alle viste avganger hvert sekund.
+         */
+        function updateCountdown() {
+            const now = new Date();
+            let hasUpcoming = false;
+
+            nextDepartures.forEach((dep, index) => {
+                const countdownElement = document.getElementById(`countdown-${index}`);
+                
+                if (dep.cancellation) {
+                    return;
+                }
+                
+                const depTime = new Date(dep.expectedDepartureTime); 
+                const diffMs = depTime - now;
+                const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+                
+
+                if (countdownElement) {
+                    if (totalSeconds > 0) {
+                        countdownElement.textContent = formatTime(totalSeconds);
+                        hasUpcoming = true;
+                    } else {
+                        // Avgången har gått
+                        countdownElement.innerHTML = '<span class="text-red-600 font-bold">GÅTT NÅ</span>';
+                    }
+                }
+            });
+
+            // Hvis ingen avganger har tid igjen, trigger vi ny henting umiddelbart.
+            if (!hasUpcoming && nextDepartures.length > 0) {
+                 // Trigger ny henting umiddelbart (den vil justere intervallet basert på ny data)
+                 fetchDepartures();
+            }
+        }
+        
+        /**
+         * Kalkulerer det optimale oppdateringsintervallet basert på tid til neste avgang.
+         */
+        function getOptimalUpdateInterval(nextDeparture) {
+            if (!nextDeparture) {
+                // Hvis ingen avganger, oppretthold et tregt sjekkintervall.
+                return SLOW_UPDATE_MS; 
+            }
+            
+            const now = new Date();
+            // Bruk expectedDepartureTime for sanntidsvurdering
+            const depTime = new Date(nextDeparture.expectedDepartureTime);
+            const diffMs = depTime - now;
+            const totalSeconds = Math.max(0, Math.floor(diffMs / 1000));
+            
+            if (totalSeconds < MIN_5_SECONDS) {
+                return FAST_UPDATE_MS; // < 5 minutter -> 10 sekunder
+            } else if (totalSeconds < MIN_10_SECONDS) {
+                return MEDIUM_UPDATE_MS; // 5 til 10 minutter -> 30 sekunder
+            } else {
+                return SLOW_UPDATE_MS; // > 10 minutter -> 60 sekunder
+            }
+        }
+
+        /**
+         * Oppdaterer tidtakeren som viser tid siden/til neste oppdatering.
+         */
+        function updateTimerDisplay() {
+            const timerElement = document.getElementById('update-timer');
+            const currentConfig = DIRECTIONS[currentDirectionKey];
+            
+            if (!lastFetchTime) {
+                // Viser loading-status hvis fetch ikke har kjørt ennå
+                timerElement.innerHTML = `<span class="inline-flex items-center text-sm text-gray-600 font-semibold gap-2">
+                    <div class="loading-spinner border-gray-400 border-l-blue-600"></div>
+                    Laster initialdata for ${currentConfig.display}...
+                </span>`;
+                return;
+            }
+
+            const now = Date.now();
+            
+            const timeSince = Math.floor((now - lastFetchTime) / 1000); 
+            // Bruker det aktive intervallet for å beregne neste oppdatering
+            const timeUntilNext = Math.ceil((lastFetchTime + currentUpdateIntervalMs - now) / 1000); 
+
+            if (timeUntilNext <= 0) {
+                 timerElement.textContent = `Henter ny data nå...`;
+            } else {
+                const intervalSeconds = currentUpdateIntervalMs / 1000;
+                timerElement.textContent = `Siste oppd. for ${timeSince}s | Neste om: ${timeUntilNext}s (Hvert ${intervalSeconds}s)`;
+            }
+        }
+        
+        /**
+         * Rendrer HTML for et enkelt avgangskort.
+         */
+        function renderDepartureCard(dep, index) {
+            const line = dep.serviceJourney.line.publicCode;
+            const destination = dep.destinationDisplay.frontText;
+            const isRealtime = dep.realtime;
+            const isCancelled = dep.cancellation; 
+            const occupancy = dep.occupancyStatus; 
+            
+            const aimedTimeFormatted = new Date(dep.aimedDepartureTime).toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' });
+
+            let realtimeColor, isRealtimeText, cardClasses;
+            let departureTime, countdownHtml;
+            let aimedTimeDisplayHtml = ''; 
+            let situationHtml = ''; 
+
+            const occupancyDisplay = getOccupancyDisplay(occupancy);
+
+            if (isCancelled) {
+                realtimeColor = 'bg-red-600';
+                isRealtimeText = 'KANSELLERT';
+                cardClasses = 'cancelled-card'; 
+                departureTime = 'AVLYST';
+                countdownHtml = '<span class="text-red-600 font-bold">AVLYST</span>';
+            } else {
+                realtimeColor = isRealtime ? 'bg-blue-600' : 'bg-gray-500';
+                isRealtimeText = isRealtime ? 'Sanntid' : 'Rutetid';
+                cardClasses = '';
+                
+                const displayTimeSource = isRealtime ? dep.expectedDepartureTime : dep.aimedDepartureTime;
+                departureTime = new Date(displayTimeSource).toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' });
+                countdownHtml = '--:--';
+                
+                if (isRealtime) {
+                    aimedTimeDisplayHtml = `<p class="text-xs text-gray-400">Rutetid: ${aimedTimeFormatted}</p>`;
+                }
+
+                let situationMessages = [];
+                if (dep.situations && dep.situations.length > 0) {
+                    dep.situations.forEach(situation => {
+                        const descriptionField = situation?.description;
+                        let descriptionsToProcess = [];
+
+                        if (Array.isArray(descriptionField)) {
+                            descriptionsToProcess = descriptionField;
+                        } 
+                        else if (descriptionField && typeof descriptionField.value === 'string') {
+                            descriptionsToProcess = [descriptionField];
+                        }
+                        
+                        descriptionsToProcess.forEach(descObj => {
+                            const rawDescription = descObj.value;
+                            const description = rawDescription ? rawDescription.trim() : '';
+                            
+                            if (description.length > 0) {
+                                situationMessages.push(description);
+                            }
+                        });
+                    });
+
+                    if (situationMessages.length > 0) {
+                        const messageList = situationMessages.map(msg => `<li class="ml-4">${msg}</li>`).join('');
+                        
+                        situationHtml = `
+                            <div class="mt-4 p-3 bg-yellow-100 border-l-4 border-yellow-500 rounded-lg text-yellow-800 text-sm">
+                                <p class="font-bold mb-1">Driftsmelding${situationMessages.length > 1 ? 'er' : ''}:</p>
+                                <ul class="list-disc pl-5 space-y-1">
+                                    ${messageList}
+                                </ul>
+                            </div>
+                        `;
+                    }
+                }
+            }
+            
+            const borderColorClass = line === '3E' ? 'border-orange-500' : 'border-blue-600';
+            
+            return `
+                <div class="departure-card p-4 md:p-6 bg-white rounded-xl shadow-lg border-b-4 ${borderColorClass} ${cardClasses}">
+                    <div class="flex justify-between items-start">
+                        <!-- Linjenummer og destinasjon -->
+                        <div>
+                            <span class="text-3xl font-extrabold p-2 rounded-lg text-white ${line === '3E' ? 'bg-orange-500' : 'bg-blue-600'}">${line}</span>
+                            <span class="ml-3 text-xl md:text-2xl font-semibold text-gray-800">${destination}</span>
+                        </div>
+                        
+                        <!-- Sanntidsindikator og Kapasitetsstatus -->
+                        <div class="flex flex-col items-end space-y-1">
+                            <!-- Sanntidsindikator / Kansellert -->
+                            <span class="text-xs font-medium text-white px-2 py-1 rounded-full ${realtimeColor}">${isRealtimeText}</span>
+                            
+                            <!-- Kapasitet: Vises kun hvis IKKE kansellert -->
+                            ${isCancelled ? '' : `<span class="text-xs font-medium px-2 py-1 rounded-full ${occupancyDisplay.color}">${occupancyDisplay.text}</span>`}
+                        </div>
+                    </div>
+                    
+                    <div class="mt-4 pt-4 flex justify-between items-end border-t">
+                        <!-- Tid og nedtelling -->
+                        <div class="text-left">
+                            ${aimedTimeDisplayHtml} <!-- VISER RUTETID NÅR SANNTID ER PÅ -->
+                            <p class="text-base text-gray-500">Forventet avgang</p>
+                            <p class="text-2xl font-bold realtime-text">${departureTime}</p>
+                        </div>
+                        <div class="text-right">
+                            <p class="text-base text-gray-500">Avgang om</p>
+                            <p id="countdown-${index}" class="text-3xl md:text-4xl font-extrabold text-blue-800 countdown-time">${countdownHtml}</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Driftsmelding (Situations) boks -->
+                    ${situationHtml}
+                </div>
+            `;
+        }
+        
+        /**
+         * Øker visningsgrensen og oppdaterer UI-et for å vise flere avganger.
+         */
+        function loadMoreDepartures() {
+            if (lastFetchedData) {
+                currentDisplayLimit += LOAD_MORE_COUNT;
+                updateUI(lastFetchedData); 
+            }
+        }
+        
+        /**
+         * Filtrerer dataen fra Entur-responsen til kun å inneholde relevante linjer (3/3E).
+         * @param {object} data - Rå dataobjekt fra Entur API.
+         * @returns {Array} Array av filtrerte estimatedCalls.
+         */
+        function filterDepartures(data, quayId) {
+            const targetQuay = data?.quay;
+            if (!targetQuay) return [];
+            
+            const estimatedCalls = targetQuay.estimatedCalls || [];
+
+            return estimatedCalls.filter(dep => {
+                const publicCode = dep.serviceJourney.line?.publicCode;
+                return publicCode && TARGET_LINES.includes(publicCode);
+            });
+        }
+
+
+        /**
+         * Oppdaterer UI-et basert på den siste hentede dataen.
+         */
+        function updateUI(data) {
+            const listContainer = document.getElementById('departures-list');
+            const noDeparturesMsg = document.getElementById('no-departures');
+            listContainer.innerHTML = '';
+            noDeparturesMsg.classList.add('hidden');
+            
+            const currentQuayId = DIRECTIONS[currentDirectionKey].id;
+            
+            const filteredDepartures = filterDepartures(data, currentQuayId);
+            
+            const hasMoreDepartures = filteredDepartures.length > currentDisplayLimit;
+
+            // Oppdater den globale nextDepartures-listen
+            nextDepartures = filteredDepartures.slice(0, currentDisplayLimit);
+
+            if (nextDepartures.length === 0) {
+                noDeparturesMsg.classList.remove('hidden');
+                clearInterval(countdownInterval); 
+                return;
+            }
+
+            // 1. Render avgangskortene
+            let htmlContent = '';
+            nextDepartures.forEach((dep, index) => {
+                htmlContent += renderDepartureCard(dep, index);
+            });
+            
+            // 2. Legg til "Last flere" knappen hvis det er flere tilgjengelig
+            if (hasMoreDepartures) {
+                 htmlContent += `
+                    <div class="text-center pt-4">
+                        <button id="load-more-btn" class="px-6 py-2 bg-gray-200 text-gray-800 font-semibold rounded-full hover:bg-gray-300 transition duration-150 shadow-md">
+                            Last flere avganger (+${LOAD_MORE_COUNT})
+                        </button>
+                    </div>
+                 `;
+            }
+
+            listContainer.innerHTML = htmlContent;
+
+            // Oppdater nedtelling
+            clearInterval(countdownInterval);
+            updateCountdown(); 
+            countdownInterval = setInterval(updateCountdown, 1000); 
+
+            // Legg til lytter for "Last flere" knappen ETTER at elementet er lagt til i DOM
+            if (hasMoreDepartures) {
+                document.getElementById('load-more-btn').addEventListener('click', loadMoreDepartures);
+            }
+        }
+
+        /**
+         * Hjelpefunksjon for å utføre Entur API-kallet.
+         */
+        async function performFetch(quayId, count) {
+            const ENTUR_QUERY = generateEnturQuery(quayId, count); 
+            
+            const response = await fetch(API_URL, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'ET-Client-Name': 'din-personlige-skjerm-app' 
+                },
+                body: JSON.stringify({ query: ENTUR_QUERY })
+            });
+
+            if (!response.ok) {
+                const errorDetails = await response.text();
+                console.error(`HTTP Feil ${response.status}:`, response.statusText, errorDetails);
+                throw new Error(`Nettverksfeil (${response.status} ${response.statusText}).`);
+            }
+
+            const json = await response.json();
+
+            if (json.errors) {
+                console.error("GraphQL-feil:", json.errors);
+                const errorMessage = json.errors[0]?.message || "Ukjent GraphQL-feil."; 
+                throw new Error(`Entur API Feil: ${errorMessage}`);
+            }
+
+            if (!json.data) {
+                console.warn("Entur API returnerte en gyldig HTTP-respons, men 'data'-feltet mangler (data: null?).", json);
+                throw new Error("Entur API-feil: Kunne ikke hente 'data'. Sjekk konsollen.");
+            }
+            
+            if (!json.data.quay) {
+                console.warn(`Quay-ID ${quayId} returnerte NULL i datafeltet.`, json.data);
+                throw new Error(`Plattform-ID (${quayId}) er ugyldig eller midlertidig utilgjengelig i Entur API.`);
+            }
+
+            return json.data;
+        }
+
+        // --- ENTUR API HOVEDFUNKSJON MED FALLBACK OG DYNAMISK INTERVALL ---
+        async function fetchDepartures() {
+            const timerElement = document.getElementById('update-timer');
+            const currentConfig = DIRECTIONS[currentDirectionKey];
+            const currentQuayId = currentConfig.id;
+
+            // Vis midlertidig spinner under lasting
+            timerElement.innerHTML = `<span class="inline-flex items-center text-sm text-gray-600 font-semibold gap-2">
+                <div class="loading-spinner border-gray-400 border-l-blue-600"></div>
+                Henter sanntidsdata for ${currentConfig.display}...
+            </span>`;
+            
+            try {
+                let data = null;
+                
+                // --- 1. Første forsøk (12 avganger) ---
+                let filteredDepartures = [];
+                try {
+                    data = await performFetch(currentQuayId, FIRST_FETCH_COUNT);
+                    filteredDepartures = filterDepartures(data, currentQuayId);
+                } catch (e) {
+                     // Hvis første forsøk feiler av tekniske årsaker, bryt
+                     throw e; 
+                }
+
+                // --- 2. Sjekk for fallback ---
+                if (filteredDepartures.length < INITIAL_DEPARTURE_LIMIT) {
+                    console.warn(`Kun ${filteredDepartures.length} avgang(er) funnet i første forsøk (${FIRST_FETCH_COUNT}). Prøver fallback på ${SECOND_FETCH_COUNT} avganger.`);
+                    
+                     timerElement.innerHTML = `<span class="inline-flex items-center text-sm text-gray-600 font-semibold gap-2">
+                        <div class="loading-spinner border-gray-400 border-l-orange-600"></div>
+                        Utvidet søk (24 avganger)...
+                    </span>`;
+
+                    // --- 3. Fallback-forsøk (24 avganger) ---
+                    data = await performFetch(currentQuayId, SECOND_FETCH_COUNT);
+                    // Oppdater filtrert liste etter fallback
+                    filteredDepartures = filterDepartures(data, currentQuayId);
+                }
+                
+                // --- 4. Final Processing & UI Update ---
+                lastFetchedData = data;
+                currentDisplayLimit = INITIAL_DEPARTURE_LIMIT; 
+
+                // Oppdater UI og den globale 'nextDepartures' listen
+                updateUI(lastFetchedData); 
+                
+                // --- 5. Dynamisk intervalljustering ---
+                const nextDeparture = nextDepartures.length > 0 ? nextDepartures[0] : null;
+                const newInterval = getOptimalUpdateInterval(nextDeparture);
+
+                if (newInterval !== currentUpdateIntervalMs) {
+                    console.log(`Oppdateringsintervall endret fra ${currentUpdateIntervalMs/1000}s til ${newInterval/1000}s basert på neste avgang.`);
+                    currentUpdateIntervalMs = newInterval;
+                    
+                    // Tilbakestill intervallet med det nye tidsrommet
+                    clearInterval(fetchInterval);
+                    fetchInterval = setInterval(fetchDepartures, currentUpdateIntervalMs);
+                }
+
+                // --- Sett tidsstempel for suksess ---
+                lastFetchTime = Date.now(); 
+                
+                const now = new Date();
+                document.getElementById('last-updated').textContent = `Sist oppdatert: ${now.toLocaleTimeString('nb-NO')}`;
+
+            } catch (error) {
+                console.error("Total feil ved lasting av bussdata:", error);
+                
+                // Vis FEIL-melding i timer-feltet for en kort periode
+                const displayError = error.message.includes('Entur API Feil') ? error.message.split(':').slice(-1)[0].trim() : error.message;
+                timerElement.innerHTML = `<span class="text-sm text-red-600 font-semibold">FEIL: ${displayError}</span>`;
+                document.getElementById('departures-list').innerHTML = '';
+                
+                // Ved feil, sett sjekkintervallet til SLOW_UPDATE_MS for å unngå å hamre på API-et
+                if (currentUpdateIntervalMs !== SLOW_UPDATE_MS) {
+                    currentUpdateIntervalMs = SLOW_UPDATE_MS;
+                    clearInterval(fetchInterval);
+                    fetchInterval = setInterval(fetchDepartures, currentUpdateIntervalMs);
+                    console.warn(`Feil under lasting. Tilbakestiller oppdateringsintervall til ${SLOW_UPDATE_MS/1000}s.`);
+                }
+
+                setTimeout(() => {
+                    if (lastFetchTime > 0) {
+                        updateTimerDisplay(); 
+                    } else {
+                        timerElement.textContent = `Kunne ikke laste data. Venter på neste forsøk...`;
+                    }
+                }, 5000); 
+
+            } finally {
+                 if (lastFetchTime > 0) {
+                    updateTimerDisplay();
+                 }
+            }
+        }
+
+        // --- Oppstart ---
+        window.onload = function() {
+            document.getElementById('direction-text').textContent = DIRECTIONS[currentDirectionKey].display;
+            
+            document.getElementById('toggle-direction-btn').addEventListener('click', toggleDirection);
+
+            timerDisplayInterval = setInterval(updateTimerDisplay, 1000);
+            
+            // Henter Entur-data ved oppstart
+            fetchDepartures();
+            
+            // Starter initial intervall. Dette vil bli justert av fetchDepartures etter første henting
+            fetchInterval = setInterval(fetchDepartures, currentUpdateIntervalMs);
+        };
+    </script>
+</body>
+</html>
