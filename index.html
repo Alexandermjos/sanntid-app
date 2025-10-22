@@ -104,7 +104,7 @@
         const SECOND_FETCH_COUNT = 24; // Andre forsøk (fallback) på antall avganger fra API
 
         // Variabler for app-tilstand
-        let currentDirectionKey = 'MORVIKBOTN_TO_VADMYRA';
+        let currentDirectionKey = 'MORVIKBOTN_TO_VADMYRA'; // Denne verdien overstyres i window.onload
         let currentDisplayLimit = INITIAL_DEPARTURE_LIMIT; // Startgrense
         let lastFetchedData = null; // Lagrer siste hentede rådata fra Entur
         
@@ -660,6 +660,18 @@
 
         // --- Oppstart ---
         window.onload = function() {
+            // --- NY LOGIKK FOR STANDARD RETNING BASERT PÅ KLOKKESLETT ---
+            const now = new Date();
+            const currentHour = now.getHours(); // 0-23
+            
+            // Morvikbotn mot Vadmyra (Morgen/Formiddag): 04:00 (inkl.) til 13:00 (ekskl.)
+            const isMorningDirection = (currentHour >= 4 && currentHour < 13);
+            
+            currentDirectionKey = isMorningDirection 
+                ? 'MORVIKBOTN_TO_VADMYRA' 
+                : 'FESTPLASSEN_TO_STOBOTN';
+            // --- SLUTT PÅ NY LOGIKK ---
+
             document.getElementById('direction-text').textContent = DIRECTIONS[currentDirectionKey].display;
             
             document.getElementById('toggle-direction-btn').addEventListener('click', toggleDirection);
