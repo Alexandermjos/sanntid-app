@@ -195,13 +195,22 @@
 
         /**
          * Hjelpefunksjon for å oversette Entur OccupancyStatus til visuell tekst og farge.
+         * NÅ inkludert visning for 'Ingen kapasitetsdata'.
          */
         function getOccupancyDisplay(status) {
-            if (!status || status === 'noData' || status === 'notApplicable') {
-                return { text: 'Ingen kapasitetsdata', color: 'bg-gray-200 text-gray-600' };
+            if (!status || status === 'noData') {
+                return { 
+                    text: 'Ingen kapasitetsdata', 
+                    color: 'bg-gray-300 text-gray-800' 
+                };
             }
             
             switch (status) {
+                case 'notApplicable':
+                    return { 
+                        text: 'Ikke relevant', 
+                        color: 'bg-gray-300 text-gray-800' 
+                    };
                 case 'manySeatsAvailable':
                     return { 
                         text: 'Mange ledige plasser', 
@@ -402,22 +411,23 @@
             return `
                 <div class="departure-card p-4 md:p-6 bg-white rounded-xl shadow-lg border-b-4 ${borderColorClass} ${cardClasses}">
                     <div class="flex justify-between items-start">
-                        <!-- START: Endret struktur for å fikse tekstbryting ved siden av linjenummeret -->
-                        <div class="flex items-center flex-grow min-w-0"> 
-                            <!-- Linjenummer (busssymbol) - Bruk flex-shrink-0 for å forhindre krymping -->
+                        <!-- Destinasjon og Linjenummer (Venstre side) -->
+                        <!-- max-w-[70%] tvinger teksten til å bryte før den dytter høyre side ned -->
+                        <div class="flex items-center max-w-[70%]"> 
+                            <!-- Linjenummer (busssymbol) -->
                             <span class="flex-shrink-0 text-3xl font-extrabold p-2 rounded-lg text-white ${line === '3E' ? 'bg-orange-500' : 'bg-blue-600'}">${line}</span>
                             
-                            <!-- Destinasjon - Bruk flex-grow og leading-tight for bedre flyt -->
-                            <div class="ml-3 flex-grow text-xl md:text-2xl font-semibold text-gray-800 leading-tight">
+                            <!-- Destinasjon -->
+                            <div class="ml-3 text-xl md:text-2xl font-semibold text-gray-800 leading-tight">
                                 ${destination}
                             </div>
                         </div>
-                        <!-- SLUTT: Endret struktur -->
                         
-                        <!-- Sanntidsindikator og Kapasitetsstatus -->
-                        <div class="flex flex-col items-end space-y-1">
+                        <!-- Sanntidsindikator og Kapasitetsstatus (Høyre side) -->
+                        <!-- flex-shrink-0 sikrer at denne kolonnen ikke krymper og holder seg på linje -->
+                        <div class="flex flex-col items-end space-y-1 flex-shrink-0"> 
                             <!-- Sanntidsindikator / Kansellert -->
-                            <span class="text-xs font-medium text-white px-2 py-1 rounded-full ${realtimeColor}">${isRealtimeText}</span>
+                            <span class="text-xs font-medium text-white px-2 py-1 rounded-full ${realtimeColor} mb-1">${isRealtimeText}</span>
                             
                             <!-- Kapasitet: Vises kun hvis IKKE kansellert -->
                             ${isCancelled ? '' : `<span class="text-xs font-medium px-2 py-1 rounded-full ${occupancyDisplay.color}">${occupancyDisplay.text}</span>`}
@@ -638,7 +648,8 @@
                 
                 // Vis FEIL-melding i timer-feltet for en kort periode
                 const displayError = error.message.includes('Entur API Feil') ? error.message.split(':').slice(-1)[0].trim() : error.message;
-                timerElement.innerHTML = `<span class="text-sm text-red-600 font-semibold">FEIL: ${displayError}</span>`;
+                // KORREKSJON: Fjernet den ekstra </span> her
+                timerElement.innerHTML = `<span class="text-sm text-red-600 font-semibold">FEIL: ${displayError}</span>`; 
                 document.getElementById('departures-list').innerHTML = '';
                 
                 // Ved feil, sett sjekkintervallet til SLOW_UPDATE_MS for å unngå å hamre på API-et
