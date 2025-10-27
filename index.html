@@ -402,11 +402,17 @@
             return `
                 <div class="departure-card p-4 md:p-6 bg-white rounded-xl shadow-lg border-b-4 ${borderColorClass} ${cardClasses}">
                     <div class="flex justify-between items-start">
-                        <!-- Linjenummer og destinasjon -->
-                        <div>
-                            <span class="text-3xl font-extrabold p-2 rounded-lg text-white ${line === '3E' ? 'bg-orange-500' : 'bg-blue-600'}">${line}</span>
-                            <span class="ml-3 text-xl md:text-2xl font-semibold text-gray-800">${destination}</span>
+                        <!-- START: Endret struktur for å fikse tekstbryting ved siden av linjenummeret -->
+                        <div class="flex items-center flex-grow min-w-0"> 
+                            <!-- Linjenummer (busssymbol) - Bruk flex-shrink-0 for å forhindre krymping -->
+                            <span class="flex-shrink-0 text-3xl font-extrabold p-2 rounded-lg text-white ${line === '3E' ? 'bg-orange-500' : 'bg-blue-600'}">${line}</span>
+                            
+                            <!-- Destinasjon - Bruk flex-grow og leading-tight for bedre flyt -->
+                            <div class="ml-3 flex-grow text-xl md:text-2xl font-semibold text-gray-800 leading-tight">
+                                ${destination}
+                            </div>
                         </div>
+                        <!-- SLUTT: Endret struktur -->
                         
                         <!-- Sanntidsindikator og Kapasitetsstatus -->
                         <div class="flex flex-col items-end space-y-1">
@@ -687,3 +693,4 @@
     </script>
 </body>
 </html>
+
