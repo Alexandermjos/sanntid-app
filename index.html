@@ -74,6 +74,11 @@
             <p class="text-sm mt-1">Sjekk Skyss/Entur for rutetabell.</p>
         </div>
 
+        <!-- Global varslingsstatus boks -->
+        <div id="notification-toast" class="fixed bottom-4 left-1/2 transform -translate-x-1/2 bg-gray-900 text-white px-4 py-2 rounded-full shadow-lg text-sm z-50 hidden transition-all duration-300">
+            Varsling aktivert for avgang!
+        </div>
+
         <!-- Tidsstempel for siste oppdatering og tidtaker. Brukes også som statusfelt under lasting. -->
         <footer class="text-center text-xs text-gray-400 mt-8">
              <p id="update-timer" class="mb-1 text-sm text-gray-600 font-medium">Laster...</p>
@@ -115,6 +120,9 @@
         
         let fetchInterval = null; // Holder ID for hovedoppdateringsintervallet
         let currentUpdateIntervalMs = FAST_UPDATE_MS; // Starter med rask oppdatering
+
+        // Lagring for aktive varsler (holder styr på hvilke avgangstider som allerede har fått alarm satt)
+        let activeAlarms = new Set();
 
         // Konfigurasjon for de to retningene
         const DIRECTIONS = {
@@ -262,6 +270,10 @@
                     if (totalSeconds > 0) {
                         countdownElement.textContent = formatTime(totalSeconds);
                         hasUpcoming = true;
+
+                        // Sjekk om det er nøyaktig 5 minutter (300 sekunder) igjen og om alarm er aktivert
+                        checkAndTriggerAlarm(dep, totalSeconds);
+
                     } else {
                         // Avgången har gått
                         countdownElement.innerHTML = '<span class="text-red-600 font-bold">GÅTT NÅ</span>';
@@ -274,6 +286,130 @@
                  // Trigger ny henting umiddelbart (den vil justere intervallet basert på ny data)
                  fetchDepartures();
             }
+        }
+
+        /**
+         * Håndterer aktivering av varsling for en gitt avgang.
+         */
+        async function setupDepartureAlert(departureId, departureTimeStr, line, destination) {
+            // 1. Sjekk om nettleseren støtter varsler
+            if (!("Notification" in window)) {
+                showToast("Nettleseren din støtter ikke varslinger.");
+                return;
+            }
+
+            // 2. Be om tillatelse hvis ikke allerede gitt
+            let permission = Notification.permission;
+            if (permission === "default") {
+                permission = await Notification.requestPermission();
+            }
+
+            if (permission !== "granted") {
+                showToast("Varsling tillatelse ble avvist.");
+                return;
+            }
+
+            // 3. Legg til i aktive alarmer
+            const alarmKey = `${departureId}_${departureTimeStr}`;
+            if (activeAlarms.has(alarmKey)) {
+                activeAlarms.delete(alarmKey);
+                updateAlarmButtonState(departureId, false);
+                showToast("Varsling deaktivert for denne avgangen.");
+            } else {
+                activeAlarms.add(alarmKey);
+                updateAlarmButtonState(departureId, true);
+                
+                const depTime = new Date(departureTimeStr);
+                const timeStr = depTime.toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' });
+                showToast(`Varsling satt! Du varsles 5 min før avgang ${timeStr} (Linje ${line})`);
+            }
+        }
+
+        /**
+         * Oppdaterer utseendet på varslingsknappen i UI.
+         */
+        function updateAlarmButtonState(departureId, isActive) {
+            const btn = document.getElementById(`alarm-btn-${departureId}`);
+            if (!btn) return;
+
+            if (isActive) {
+                btn.classList.remove('bg-gray-100', 'text-gray-600', 'hover:bg-gray-200');
+                btn.classList.add('bg-blue-600', 'text-white', 'shadow-sm');
+                btn.innerHTML = `
+                    <svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/>
+                    </svg>
+                    Varsler aktiv
+                `;
+            } else {
+                btn.classList.remove('bg-blue-600', 'text-white', 'shadow-sm');
+                btn.classList.add('bg-gray-100', 'text-gray-600', 'hover:bg-gray-200');
+                btn.innerHTML = `
+                    <svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/>
+                    </svg>
+                    Varsle 5 min før
+                `;
+            }
+        }
+
+        /**
+         * Sjekker om alarm skal utløses (når det er ca. 300 sekunder / 5 minutter igjen).
+         */
+        function checkAndTriggerAlarm(dep, totalSeconds) {
+            const line = dep.serviceJourney.line.publicCode;
+            const destination = dep.destinationDisplay.frontText;
+            const departureTimeStr = dep.expectedDepartureTime;
+            // Bruk en unik identifikator basert på reise og tidspunkt
+            const departureId = dep.serviceJourney?.id || `${line}_${departureTimeStr}`;
+            const alarmKey = `${departureId}_${departureTimeStr}`;
+
+            // Utløs alarm når det er mellom 295 og 305 sekunder igjen (for å sikreffektivt treffe i sekund-loopen)
+            if (activeAlarms.has(alarmKey) && totalSeconds >= 295 && totalSeconds <= 305) {
+                // Fjern fra aktive alarmer slik at den ikke spammer
+                activeAlarms.delete(alarmKey);
+                updateAlarmButtonState(departureId, false);
+
+                // Utløs systemvarsling
+                if (Notification.permission === "granted") {
+                    try {
+                        navigator.serviceWorker.ready.then(registration => {
+                            registration.showNotification("Bussen går snart! 🚌", {
+                                body: `Linje ${line} til ${destination} har avgang om 5 minutter!`,
+                                icon: 'https://placehold.co/192x192/0d47a1/ffffff?text=B3',
+                                badge: 'https://placehold.co/96x96/0d47a1/ffffff?text=B3',
+                                tag: alarmKey
+                            });
+                        }).catch(() => {
+                            // Fallback hvis serviceWorker ikke er registrert i denne konteksten
+                            new Notification("Bussen går snart! 🚌", {
+                                body: `Linje ${line} til ${destination} har avgang om 5 minutter!`
+                            });
+                        });
+                    } catch (e) {
+                        new Notification("Bussen går snart! 🚌", {
+                            body: `Linje ${line} til ${destination} har avgang om 5 minutter!`
+                        });
+                    }
+                }
+
+                // Prøv også å vibrere telefonen hvis støttet
+                if ("vibrate" in navigator) {
+                    navigator.vibrate([200, 100, 200, 100, 500]);
+                }
+            }
+        }
+
+        /**
+         * Viser en midlertidig melding (toast) på skjermen.
+         */
+        function showToast(message) {
+            const toast = document.getElementById('notification-toast');
+            toast.textContent = message;
+            toast.classList.remove('hidden');
+            setTimeout(() => {
+                toast.classList.add('hidden');
+            }, 3500);
         }
         
         /**
@@ -339,6 +475,9 @@
             const isRealtime = dep.realtime;
             const isCancelled = dep.cancellation; 
             const occupancy = dep.occupancyStatus; 
+            const departureId = dep.serviceJourney?.id || `${line}_${dep.expectedDepartureTime}`;
+            const alarmKey = `${departureId}_${dep.expectedDepartureTime}`;
+            const isAlarmActive = activeAlarms.has(alarmKey);
             
             const aimedTimeFormatted = new Date(dep.aimedDepartureTime).toLocaleTimeString('nb-NO', { hour: '2-digit', minute: '2-digit' });
 
@@ -408,11 +547,19 @@
             
             const borderColorClass = line === '3E' ? 'border-orange-500' : 'border-blue-600';
             
+            // Alarm knappe-styling basert på om den er aktiv
+            const alarmBtnClasses = isAlarmActive 
+                ? 'bg-blue-600 text-white shadow-sm' 
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200';
+            
+            const alarmBtnText = isAlarmActive 
+                ? `<svg class="w-4 h-4 inline mr-1" fill="currentColor" viewBox="0 0 24 24"><path d="M12 22c1.1 0 2-.9 2-2h-4c0 1.1.9 2 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4c0-.83-.67-1.5-1.5-1.5s-1.5.67-1.5 1.5v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z"/></svg> Varsler aktiv`
+                : `<svg class="w-4 h-4 inline mr-1" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg> Varsle 5 min før`;
+
             return `
                 <div class="departure-card p-4 md:p-6 bg-white rounded-xl shadow-lg border-b-4 ${borderColorClass} ${cardClasses}">
                     <div class="flex justify-between items-start">
                         <!-- Destinasjon og Linjenummer (Venstre side) -->
-                        <!-- max-w-[70%] tvinger teksten til å bryte før den dytter høyre side ned -->
                         <div class="flex items-center max-w-[70%]"> 
                             <!-- Linjenummer (busssymbol) -->
                             <span class="flex-shrink-0 text-3xl font-extrabold p-2 rounded-lg text-white ${line === '3E' ? 'bg-orange-500' : 'bg-blue-600'}">${line}</span>
@@ -423,29 +570,39 @@
                             </div>
                         </div>
                         
-                        <!-- Sanntidsindikator og Kapasitetsstatus (Høyre side) -->
-                        <!-- flex-shrink-0 sikrer at denne kolonnen ikke krymper og holder seg på linje -->
-                        <div class="flex flex-col items-end space-y-1 flex-shrink-0"> 
-                            <!-- Sanntidsindikator / Kansellert -->
-                            <span class="text-xs font-medium text-white px-2 py-1 rounded-full ${realtimeColor} mb-1">${isRealtimeText}</span>
-                            
-                            <!-- Kapasitet: Vises kun hvis IKKE kansellert -->
-                            ${isCancelled ? '' : `<span class="text-xs font-medium px-2 py-1 rounded-full ${occupancyDisplay.color}">${occupancyDisplay.text}</span>`}
+                        <!-- Sanntidsindikator (Høyre side øverst) -->
+                        <div class="flex flex-col items-end flex-shrink-0"> 
+                            <span class="text-xs font-medium text-white px-2 py-1 rounded-full ${realtimeColor}">${isRealtimeText}</span>
                         </div>
                     </div>
                     
                     <div class="mt-4 pt-4 flex justify-between items-end border-t">
                         <!-- Tid og nedtelling -->
                         <div class="text-left">
-                            ${aimedTimeDisplayHtml} <!-- VISER RUTETID NÅR SANNTID ER PÅ -->
+                            ${aimedTimeDisplayHtml}
                             <p class="text-base text-gray-500">Forventet avgang</p>
                             <p class="text-2xl font-bold realtime-text">${departureTime}</p>
                         </div>
+                        
+                        <!-- Kapasitetsstatus plassert i midten -->
+                        <div class="text-center px-2">
+                            ${isCancelled ? '' : `<span class="text-xs font-medium px-2.5 py-1 rounded-full inline-block ${occupancyDisplay.color}">${occupancyDisplay.text}</span>`}
+                        </div>
+
                         <div class="text-right">
                             <p class="text-base text-gray-500">Avgang om</p>
                             <p id="countdown-${index}" class="text-3xl md:text-4xl font-extrabold text-blue-800 countdown-time">${countdownHtml}</p>
                         </div>
                     </div>
+
+                    <!-- Varslingsknapp (Vises ikke om avgangen er kansellert) -->
+                    ${isCancelled ? '' : `
+                        <div class="mt-4 pt-3 border-t border-gray-100 flex justify-end">
+                            <button id="alarm-btn-${departureId}" onclick="setupDepartureAlert('${departureId}', '${dep.expectedDepartureTime}', '${line}', '${destination.replace(/'/g, "\\'")}')" class="text-xs font-semibold px-3 py-1.5 rounded-full transition duration-150 flex items-center ${alarmBtnClasses}">
+                                ${alarmBtnText}
+                            </button>
+                        </div>
+                    `}
                     
                     <!-- Driftsmelding (Situations) boks -->
                     ${situationHtml}
@@ -704,4 +861,3 @@
     </script>
 </body>
 </html>
-
